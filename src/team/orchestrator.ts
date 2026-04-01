@@ -1,7 +1,7 @@
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
-import { execSync } from 'child_process'
+import { spawnSync } from 'child_process'
 import { type Task, type Session, STATE_DIR, ensureStateDir, writeSession, writeTask } from '../state/session.js'
 
 export type WorkerSpec = {
@@ -63,9 +63,9 @@ export async function writeContextSnapshot(slug: string, task: string): Promise<
   return path
 }
 
-export async function decomposeTasks(task: string, specs: WorkerSpec[]): Promise<Task[]> {
+export async function decomposeTasks(task: string, specs: WorkerSpec[], dryRun = false): Promise<Task[]> {
   const totalWorkers = specs.reduce((sum, s) => sum + s.count, 0)
-  const subtasks = await callClaudeDecompose(task, totalWorkers)
+  const subtasks = callClaudeDecompose(task, totalWorkers)
 
   const tasks: Task[] = []
   let idx = 0
@@ -80,7 +80,7 @@ export async function decomposeTasks(task: string, specs: WorkerSpec[]): Promise
         createdAt: new Date().toISOString(),
       }
       tasks.push(t)
-      await writeTask(t)
+      if (!dryRun) await writeTask(t)
       idx++
     }
   }
@@ -96,15 +96,15 @@ function callClaudeDecompose(task: string, n: number): string[] {
 Task: "${task}"`
 
   try {
-    const escaped = prompt.replace(/'/g, `'"'"'`)
-    const raw = execSync(`claude --print -p '${escaped}'`, {
+    const result = spawnSync('claude', ['--print', '-p', prompt], {
       encoding: 'utf8',
       timeout: 30_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
+    })
+
+    if (result.status !== 0 || !result.stdout) throw new Error(result.stderr ?? 'no output')
 
     // Extract JSON array from the response (strip any surrounding prose)
-    const match = raw.match(/\[[\s\S]*\]/)
+    const match = result.stdout.match(/\[[\s\S]*\]/)
     if (!match) throw new Error('No JSON array in response')
     const parsed: unknown = JSON.parse(match[0])
     if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty array')

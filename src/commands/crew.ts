@@ -1,5 +1,5 @@
 import { execSync, spawn } from 'child_process'
-import { writeFile, mkdir } from 'fs/promises'
+import { writeFile, mkdir, open } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import {
@@ -20,17 +20,37 @@ const isWSL = (): boolean =>
 
 export async function crew(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('Usage: loom crew [N] "<task>"')
+    console.error('Usage: loom crew [--dry-run] [N] "<task>"')
     process.exit(1)
   }
 
-  const { specs, task } = parseWorkerSpec(args)
+  const dryRun = args.includes('--dry-run')
+  const filteredArgs = args.filter(a => a !== '--dry-run')
+
+  const { specs, task } = parseWorkerSpec(filteredArgs)
   const totalWorkers = specs.reduce((sum, s) => sum + s.count, 0)
   const slug = task.slice(0, 30).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
 
   console.log(`\nagentloom crew`)
   console.log(`Task:    ${task}`)
   console.log(`Workers: ${totalWorkers}`)
+
+  if (dryRun) {
+    console.log(`Mode:    dry-run\n`)
+    console.log('Decomposing task...\n')
+    const tasks = await decomposeTasks(task, specs, true)
+    let idx = 0
+    for (const spec of specs) {
+      for (let i = 0; i < spec.count; i++) {
+        const t = tasks[idx++]
+        console.log(`  [w${String(idx - 1).padStart(2, '0')}] (${spec.agentType})`)
+        console.log(`       ${t?.description ?? task}\n`)
+      }
+    }
+    console.log('Run without --dry-run to launch workers.')
+    return
+  }
+
   console.log(`Mode:    ${hasTmux() && !isWSL() ? 'tmux' : 'background processes'}\n`)
 
   const session = await initSession(task, totalWorkers)
@@ -41,46 +61,44 @@ export async function crew(args: string[]): Promise<void> {
   console.log(`Tasks:   ${tasks.length} created`)
   console.log(`Context: ${contextPath}\n`)
 
-  const workerPrompt = buildWorkerPrompt(task, contextPath, session.id)
-
   if (hasTmux() && !isWSL()) {
-    await launchTmux(session.id, totalWorkers, specs, workerPrompt)
+    await launchTmux(session.id, totalWorkers, specs, tasks.map(t => t.description), contextPath)
   } else {
-    await launchBackground(session.id, totalWorkers, specs, workerPrompt)
+    await launchBackground(session.id, specs, tasks.map(t => t.description), contextPath)
   }
 
-  console.log(`\nWorkers launched. Monitor with: loom status`)
+  console.log(`\nWorkers launched. Monitor with:`)
+  console.log(`  loom status`)
+  console.log(`  loom logs`)
   console.log(`State dir: ${STATE_DIR}/`)
 }
 
-function buildWorkerPrompt(task: string, contextPath: string, sessionId: string): string {
-  return `You are a worker agent in an agentloom crew session (${sessionId}).
+function buildWorkerPrompt(subtask: string, contextPath: string, sessionId: string, workerId: string): string {
+  const resultFile = join(STATE_DIR, 'workers', `${workerId}-result.md`)
+  return `You are worker ${workerId} in an agentloom crew session (${sessionId}).
 
-Your job: help complete this task: "${task}"
+Your assigned subtask: "${subtask}"
 
-## Your protocol
+## Protocol
 
-1. Read the shared context at: ${contextPath}
-2. Check ${STATE_DIR}/tasks/ for unclaimed work (files ending in -pending.json)
-3. Claim a task by reading it and noting the task ID
-4. Do the work thoroughly using all tools available to you
-5. Write your result back to ${STATE_DIR}/workers/
-6. Repeat until no pending tasks remain
+1. Read the shared context: ${contextPath}
+2. Do the work thoroughly using all tools available to you
+3. When done, write a result summary to: ${resultFile}
+   Format: brief markdown — what you did, what you found, any blockers
 
 ## Rules
-- Claim only one task at a time
-- Write your findings to the context file so other workers can see them
-- Do not stop until you have completed at least one task
-- If all tasks are claimed, do exploratory work relevant to the main task
+- Focus only on your assigned subtask
+- Write findings to the context file (${contextPath}) so other workers can see them
+- Do not stop until your subtask is complete or you have hit a genuine blocker
 
-Begin now. Check for pending tasks and start working.`
+Begin now.`
 }
 
 async function launchBackground(
   sessionId: string,
-  count: number,
   specs: Array<{ count: number; agentType: string }>,
-  prompt: string,
+  subtasks: string[],
+  contextPath: string,
 ): Promise<void> {
   await mkdir(join(STATE_DIR, 'workers'), { recursive: true })
 
@@ -88,22 +106,28 @@ async function launchBackground(
   for (const spec of specs) {
     for (let i = 0; i < spec.count; i++) {
       const workerId = `w${String(workerIdx).padStart(2, '0')}`
+      const subtask = subtasks[workerIdx] ?? subtasks[0] ?? ''
       workerIdx++
 
-      const promptFile = join(STATE_DIR, 'workers', `${workerId}-prompt.md`)
-      await writeFile(promptFile, prompt)
+      const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId)
+      const logFile = join(STATE_DIR, 'workers', `${workerId}.log`)
 
+      // Write prompt to disk for inspection
+      await writeFile(join(STATE_DIR, 'workers', `${workerId}-prompt.md`), prompt)
+
+      const log = await open(logFile, 'w')
       const child = spawn(
         'claude',
         ['--print', '--dangerously-skip-permissions', '-p', prompt],
         {
           detached: true,
-          stdio: ['ignore', 'ignore', 'ignore'],
+          stdio: ['ignore', log.fd, log.fd],
           env: { ...process.env, AGENTLOOM_WORKER_ID: workerId, AGENTLOOM_SESSION: sessionId },
         }
       )
+      child.on('close', () => log.close())
       child.unref()
-      console.log(`  ✓ Worker ${workerId} (${spec.agentType}) launched [pid ${child.pid}]`)
+      console.log(`  ✓ Worker ${workerId} (${spec.agentType}) launched [pid ${child.pid}] → ${logFile}`)
     }
   }
 }
@@ -112,7 +136,8 @@ async function launchTmux(
   sessionId: string,
   count: number,
   specs: Array<{ count: number; agentType: string }>,
-  prompt: string,
+  subtasks: string[],
+  contextPath: string,
 ): Promise<void> {
   const tmuxSession = `loom-${sessionId}`
 
@@ -122,7 +147,10 @@ async function launchTmux(
   for (const spec of specs) {
     for (let i = 0; i < spec.count; i++) {
       const workerId = `w${String(workerIdx).padStart(2, '0')}`
+      const subtask = subtasks[workerIdx] ?? subtasks[0] ?? ''
       workerIdx++
+
+      const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId)
 
       if (workerIdx > 1) {
         execSync(`tmux split-window -h -t ${tmuxSession}`)
