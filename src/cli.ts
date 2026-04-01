@@ -3,6 +3,8 @@ import { setup } from './commands/setup.js'
 import { crew } from './commands/crew.js'
 import { status } from './commands/status.js'
 import { logs } from './commands/logs.js'
+import { collect } from './commands/collect.js'
+import { reset } from './commands/reset.js'
 
 const [,, command, ...args] = process.argv
 
@@ -17,6 +19,9 @@ Usage:
   loom status                           Show active crew session
   loom logs                             Show worker output summary
   loom logs <workerId>                  Show full log for a specific worker
+  loom collect                          Synthesize worker results into a summary
+  loom collect --no-ai                  Collect results without Claude synthesis
+  loom reset --force                    Clear all session state
 
 Modes (use $grind or $crew inside a Claude Code session):
   $grind   Persistence loop — keeps working until verified complete
@@ -44,6 +49,12 @@ switch (command) {
     break
   case 'logs':
     await logs(args)
+    break
+  case 'collect':
+    await collect(args)
+    break
+  case 'reset':
+    await reset(args)
     break
   default:
     console.log(usage)
