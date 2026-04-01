@@ -1,12 +1,17 @@
 {
-  "name": "agentloom",
-  "version": "0.1.0",
+  "name": "@chuckssmith/agentloom",
+  "version": "0.2.0",
   "description": "A workflow layer for Claude Code — reusable roles, persistence loops, and multi-agent crew coordination",
-  "keywords": ["ai", "agent", "workflow", "multi-agent"],
+  "keywords": [
+    "ai",
+    "agent",
+    "workflow",
+    "multi-agent"
+  ],
   "homepage": "https://github.com/cssmith615/agentloom",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cssmith615/agentloom.git"
+    "url": "git+https://github.com/cssmith615/agentloom.git"
   },
   "license": "MIT",
   "author": "cssmith615",
@@ -16,7 +21,7 @@
   ],
   "type": "module",
   "bin": {
-    "loom": "./dist/cli.js"
+    "loom": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc",
