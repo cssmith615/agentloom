@@ -1,12 +1,12 @@
-import { readdir, readFile, rename, writeFile } from 'fs/promises'
-import { join, basename } from 'path'
+import { readdir, readFile, rename, writeFile, stat, unlink } from 'fs/promises'
+import { join } from 'path'
 import { type Task, STATE_DIR } from '../state/session.js'
 
 const TASKS_DIR = join(STATE_DIR, 'tasks')
-const CLAIM_TTL_MS = 30 * 60 * 1000 // 30 minutes — claimed tasks older than this are re-queued
+const CLAIM_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
 // Recover tasks whose worker crashed before completing.
-// Finds -claimed- files older than CLAIM_TTL_MS and renames them back to -pending.json.
+// Finds -claimed- files older than CLAIM_TTL_MS and re-queues them as -pending.
 export async function recoverStaleClaims(): Promise<number> {
   let recovered = 0
   let files: string[]
@@ -22,28 +22,23 @@ export async function recoverStaleClaims(): Promise<number> {
   for (const file of claimed) {
     const filePath = join(TASKS_DIR, file)
     try {
-      const { mtimeMs } = await import('fs/promises').then(m =>
-        m.stat(filePath)
-      )
+      const { mtimeMs } = await stat(filePath)
       if (now - mtimeMs < CLAIM_TTL_MS) continue
 
-      // Parse task id from filename: {id}-claimed-{workerId}.json
       const taskId = file.split('-claimed-')[0]
       if (!taskId) continue
 
-      const pendingPath = join(TASKS_DIR, `${taskId}-pending.json`)
-
-      // Re-read the file and reset status before writing back as pending
       const task: Task = JSON.parse(await readFile(filePath, 'utf8'))
       task.status = 'pending'
       delete task.workerId
       delete task.claimedAt
 
+      const pendingPath = join(TASKS_DIR, `${taskId}-pending.json`)
+
+      // Write the reset task to the pending path, then remove the stale claimed file.
+      // (Do NOT rename claimed→pending: that would overwrite our fresh write with stale data.)
       await writeFile(pendingPath, JSON.stringify(task, null, 2))
-      await rename(filePath, pendingPath).catch(() => {
-        // If the write succeeded but rename fails (e.g. destination now exists from another
-        // recovery run), leave it — the pending file was already written
-      })
+      await unlink(filePath).catch(() => { /* best effort — pending file is already written */ })
       recovered++
     } catch {
       // Skip files we can't read/stat — don't crash the recovery pass
@@ -72,12 +67,8 @@ export async function claimTask(workerId: string): Promise<Task | null> {
     const newPath = join(TASKS_DIR, newFile)
 
     try {
-      // Prepare the updated task object BEFORE the rename.
-      // If writeFile fails after a successful rename, we rename back so the task
-      // re-enters the pending pool rather than being stuck as claimed with stale data.
-      const raw = await readFile(oldPath, 'utf8')
-      const task: Task = JSON.parse(raw)
-
+      // Prepare updated task object BEFORE the rename.
+      const task: Task = JSON.parse(await readFile(oldPath, 'utf8'))
       task.status = 'claimed'
       task.workerId = workerId
       task.claimedAt = new Date().toISOString()
@@ -91,12 +82,20 @@ export async function claimTask(workerId: string): Promise<Task | null> {
       } catch (writeErr) {
         // Rename succeeded but write failed — roll back so the task isn't orphaned
         await rename(newPath, oldPath).catch(() => { /* best effort */ })
-        throw writeErr
+        // Log genuine I/O errors (disk full, permissions) — these are not race conditions
+        process.stderr.write(`[agentloom] claimTask writeFile failed for ${file}: ${writeErr}\n`)
+        // Continue to next task rather than crashing — another task may succeed
+        continue
       }
 
       return task
-    } catch {
-      // Another worker claimed it first (ENOENT/EPERM), or rollback — try next
+    } catch (err: unknown) {
+      // ENOENT/EPERM = another worker claimed it first — expected, try next file
+      // Any other error is unexpected; log and skip
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'EPERM' && code !== 'EACCES') {
+        process.stderr.write(`[agentloom] claimTask unexpected error for ${file}: ${err}\n`)
+      }
       continue
     }
   }
@@ -117,7 +116,7 @@ export async function completeTask(task: Task, result: string): Promise<void> {
     await writeFile(claimedFile, JSON.stringify(task, null, 2))
     await rename(claimedFile, doneFile)
   } catch {
-    // If the claimed file is already gone (double-complete), write directly to done path
+    // Double-complete or missing claimed file — write directly to done path
     await writeFile(doneFile, JSON.stringify(task, null, 2)).catch(() => { /* best effort */ })
   }
 }

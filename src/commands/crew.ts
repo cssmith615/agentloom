@@ -157,11 +157,13 @@ async function launchBackground(
 
       await writeFile(join(STATE_DIR, 'workers', `${workerId}-prompt.md`), prompt)
 
-      const claudeArgs = ['--print', '-p', prompt]
-      // Only pass --dangerously-skip-permissions to roles that write files
-      if (!READ_ONLY_ROLES.has(agentType)) {
-        claudeArgs.splice(2, 0, '--dangerously-skip-permissions')
-      }
+      // Build args declaratively — no positional splicing
+      const claudeArgs = [
+        '--print',
+        ...(!READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
+        '-p',
+        prompt,
+      ]
 
       const log = await open(logFile, 'w')
       const child = spawn('claude', claudeArgs, {
@@ -223,18 +225,22 @@ async function launchTmux(
       workerIdx++
 
       const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId, agentType)
+      const promptFile = join(STATE_DIR, 'workers', `${workerId}-prompt.md`)
+      const scriptFile = join(STATE_DIR, 'workers', `${workerId}-run.mjs`)
 
-      // Write prompt and a runner script to disk — avoids ALL shell escaping issues
-      const scriptFile = join(STATE_DIR, 'workers', `${workerId}-run.sh`)
-      const permFlag = READ_ONLY_ROLES.has(agentType) ? '' : '--dangerously-skip-permissions '
-      await writeFile(join(STATE_DIR, 'workers', `${workerId}-prompt.md`), prompt)
+      await writeFile(promptFile, prompt)
+
+      // Node.js runner — JSON.stringify safely encodes all values, no shell expansion possible
       await writeFile(scriptFile, [
-        '#!/bin/sh',
-        `export AGENTLOOM_WORKER_ID=${workerId}`,
-        `export AGENTLOOM_SESSION=${sessionId}`,
-        `claude --print ${permFlag}-p "$(cat '${join(STATE_DIR, 'workers', `${workerId}-prompt.md`)}')"`,
-        `echo '[worker done]'`,
-        `read`,
+        `import { readFileSync } from 'fs'`,
+        `import { spawnSync } from 'child_process'`,
+        `process.env.AGENTLOOM_WORKER_ID = ${JSON.stringify(workerId)}`,
+        `process.env.AGENTLOOM_SESSION = ${JSON.stringify(sessionId)}`,
+        `const prompt = readFileSync(${JSON.stringify(promptFile)}, 'utf8')`,
+        `const args = ['--print', ${!READ_ONLY_ROLES.has(agentType) ? `'--dangerously-skip-permissions', ` : ``}'${'-p'}', prompt]`,
+        `const r = spawnSync('claude', args, { stdio: 'inherit' })`,
+        `console.log('[worker done]')`,
+        `process.exit(r.status ?? 0)`,
       ].join('\n'))
 
       if (workerIdx > 1) {
@@ -246,10 +252,12 @@ async function launchTmux(
         }
       }
 
-      try {
-        execSync(`tmux send-keys -t ${tmuxSession} "sh '${scriptFile}'" Enter`)
-      } catch (err) {
-        console.error(`  ✗ Worker ${workerId}: failed to send tmux keys: ${err instanceof Error ? err.message : err}`)
+      // Use spawnSync (no shell) so the scriptFile path is passed as a literal argument.
+      // Escape single quotes in the path for the shell inside the tmux pane.
+      const shellSafePath = scriptFile.replace(/'/g, "'\\''")
+      const sendResult = spawnSync('tmux', ['send-keys', '-t', tmuxSession, `node '${shellSafePath}'`, 'Enter'], { stdio: 'ignore' })
+      if (sendResult.status !== 0) {
+        console.error(`  ✗ Worker ${workerId}: failed to send tmux keys`)
         continue
       }
 
