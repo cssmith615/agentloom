@@ -1,6 +1,7 @@
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
+import { execSync } from 'child_process'
 import { type Task, type Session, STATE_DIR, ensureStateDir, writeSession, writeTask } from '../state/session.js'
 
 export type WorkerSpec = {
@@ -63,23 +64,56 @@ export async function writeContextSnapshot(slug: string, task: string): Promise<
 }
 
 export async function decomposeTasks(task: string, specs: WorkerSpec[]): Promise<Task[]> {
-  // For now: create one task per worker spec segment.
-  // In a future iteration, we'll use Claude to decompose the task.
+  const totalWorkers = specs.reduce((sum, s) => sum + s.count, 0)
+  const subtasks = await callClaudeDecompose(task, totalWorkers)
+
   const tasks: Task[] = []
+  let idx = 0
 
   for (const spec of specs) {
     for (let i = 0; i < spec.count; i++) {
       const t: Task = {
         id: randomUUID().slice(0, 8),
-        description: task,
+        description: subtasks[idx] ?? task,
         agentType: spec.agentType,
         status: 'pending',
         createdAt: new Date().toISOString(),
       }
       tasks.push(t)
       await writeTask(t)
+      idx++
     }
   }
 
   return tasks
+}
+
+function callClaudeDecompose(task: string, n: number): string[] {
+  if (n <= 1) return [task]
+
+  const prompt = `Decompose this task into exactly ${n} independent subtasks that can run in parallel. Each must be specific and actionable. Respond with a JSON array of ${n} strings — no explanation, no markdown, just the array.
+
+Task: "${task}"`
+
+  try {
+    const escaped = prompt.replace(/'/g, `'"'"'`)
+    const raw = execSync(`claude --print -p '${escaped}'`, {
+      encoding: 'utf8',
+      timeout: 30_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+
+    // Extract JSON array from the response (strip any surrounding prose)
+    const match = raw.match(/\[[\s\S]*\]/)
+    if (!match) throw new Error('No JSON array in response')
+    const parsed: unknown = JSON.parse(match[0])
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty array')
+    const subtasks = parsed.map(String)
+    // Pad or trim to exactly n
+    while (subtasks.length < n) subtasks.push(task)
+    return subtasks.slice(0, n)
+  } catch {
+    // Fallback: every worker gets the same task description
+    return Array<string>(n).fill(task)
+  }
 }

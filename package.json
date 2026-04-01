@@ -10,6 +10,10 @@
   },
   "license": "MIT",
   "author": "cssmith615",
+  "files": [
+    "dist",
+    "skills"
+  ],
   "type": "module",
   "bin": {
     "loom": "./dist/cli.js"
