@@ -1,6 +1,7 @@
 import { execSync, spawn, spawnSync } from 'child_process'
-import { writeFile, mkdir, open } from 'fs/promises'
+import { writeFile, mkdir, open, readFile } from 'fs/promises'
 import { join } from 'path'
+import { existsSync } from 'fs'
 import {
   parseWorkerSpec,
   initSession,
@@ -85,7 +86,8 @@ export async function crew(args: string[]): Promise<void> {
   }
 
   const dryRun = args.includes('--dry-run')
-  const filteredArgs = args.filter(a => a !== '--dry-run')
+  const serial = args.includes('--serial')
+  const filteredArgs = args.filter(a => a !== '--dry-run' && a !== '--serial')
 
   const { specs, task } = parseWorkerSpec(filteredArgs)
   const totalWorkers = specs.reduce((sum, s) => sum + s.count, 0)
@@ -112,7 +114,8 @@ export async function crew(args: string[]): Promise<void> {
   }
 
   const useTmux = hasTmux() && !isWSL() && process.stdout.isTTY
-  console.log(`Mode:    ${useTmux ? 'tmux' : 'background processes'}\n`)
+  const mode = serial ? 'serial' : useTmux ? 'tmux' : 'background processes'
+  console.log(`Mode:    ${mode}\n`)
 
   const session = await initSession(task, totalWorkers)
   const contextPath = await writeContextSnapshot(slug, task)
@@ -122,17 +125,80 @@ export async function crew(args: string[]): Promise<void> {
   console.log(`Tasks:   ${tasks.length} created`)
   console.log(`Context: ${contextPath}\n`)
 
-  if (useTmux) {
+  if (serial) {
+    await launchSerial(session.id, specs, tasks, contextPath)
+    console.log(`\nAll workers finished. Run: loom collect`)
+  } else if (useTmux) {
     await launchTmux(session.id, specs, tasks, contextPath)
+    console.log(`\nWorkers launched. Monitor with:`)
+    console.log(`  loom status`)
+    console.log(`  loom stop    (kill all workers)`)
   } else {
     await launchBackground(session.id, specs, tasks, contextPath)
+    console.log(`\nWorkers launched. Monitor with:`)
+    console.log(`  loom status`)
+    console.log(`  loom watch`)
+    console.log(`  loom stop    (kill all workers)`)
   }
-
-  console.log(`\nWorkers launched. Monitor with:`)
-  console.log(`  loom status`)
-  console.log(`  loom watch`)
-  console.log(`  loom stop    (kill all workers)`)
   console.log(`State dir: ${STATE_DIR}/`)
+}
+
+async function launchSerial(
+  sessionId: string,
+  specs: Array<{ count: number; agentType: string }>,
+  tasks: Array<{ description: string; agentType?: string }>,
+  contextPath: string,
+): Promise<void> {
+  await mkdir(join(STATE_DIR, 'workers'), { recursive: true })
+
+  let workerIdx = 0
+  for (const spec of specs) {
+    for (let i = 0; i < spec.count; i++) {
+      const workerId = `w${String(workerIdx).padStart(2, '0')}`
+      const subtask = tasks[workerIdx]?.description ?? tasks[0]?.description ?? ''
+      const agentType = tasks[workerIdx]?.agentType ?? spec.agentType
+      workerIdx++
+
+      // Each worker receives results from all previous workers via the context file
+      const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId, agentType)
+      const logFile = join(STATE_DIR, 'workers', `${workerId}.log`)
+
+      await writeFile(join(STATE_DIR, 'workers', `${workerId}-prompt.md`), prompt)
+
+      console.log(`  → Worker ${workerId} (${agentType}) starting...`)
+
+      const claudeArgs = [
+        '--print',
+        ...(!READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
+        '-p',
+        prompt,
+      ]
+
+      // Run synchronously — block until this worker is done before starting the next
+      const result = spawnSync('claude', claudeArgs, {
+        encoding: 'utf8',
+        timeout: 30 * 60 * 1000, // 30 min max per worker
+        env: { ...process.env, AGENTLOOM_WORKER_ID: workerId, AGENTLOOM_SESSION: sessionId },
+      })
+
+      const output = (result.stdout ?? '') + (result.stderr ?? '')
+      await writeFile(logFile, output)
+
+      if (result.status !== 0) {
+        const resultFile = join(STATE_DIR, 'workers', `${workerId}-result.md`)
+        await writeFile(resultFile, `# Error\n\nWorker exited with code ${result.status ?? 'unknown'}\n\n${output.slice(-500)}`)
+        console.log(`  ✗ Worker ${workerId} failed (exit ${result.status ?? '?'})`)
+      } else {
+        // If worker didn't write its own result file, write a placeholder
+        const resultFile = join(STATE_DIR, 'workers', `${workerId}-result.md`)
+        if (!existsSync(resultFile)) {
+          const lastLines = output.trim().split('\n').slice(-20).join('\n')
+          await writeFile(resultFile, `# Result\n\n${lastLines}`)
+        }
+        console.log(`  ✓ Worker ${workerId} done`)
+      }
+    }
+  }
 }
 
 async function launchBackground(

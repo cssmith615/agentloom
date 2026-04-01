@@ -1,9 +1,18 @@
 import { readSession, readTasks, STATE_DIR } from '../state/session.js'
 import { existsSync, statSync } from 'fs'
 import { join } from 'path'
-import { readdir } from 'fs/promises'
+import { readdir, readFile } from 'fs/promises'
 
-const STALE_THRESHOLD_MS = 10 * 60 * 1000 // 10 minutes with no log growth = stale
+const STALE_THRESHOLD_MS = 10 * 60 * 1000 // 10 min with no log growth AND no live PID = stale
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
 
 export async function status(): Promise<void> {
   if (!existsSync(STATE_DIR)) {
@@ -53,20 +62,31 @@ export async function status(): Promise<void> {
       continue
     }
 
-    // Check if log is growing (worker is alive) or stale
+    // Check PID liveness first — a quiet log doesn't mean a dead worker
+    const pidPath = join(workersDir, `${workerId}.pid`)
+    let pidAlive = false
+    if (existsSync(pidPath)) {
+      const pid = parseInt(await readFile(pidPath, 'utf8').catch(() => ''), 10)
+      if (!isNaN(pid)) pidAlive = isProcessAlive(pid)
+    }
+
     const logStat = statSync(logPath)
     const msSinceWrite = now - logStat.mtimeMs
-    const isStale = msSinceWrite > STALE_THRESHOLD_MS
     const logSize = logStat.size
 
-    if (logSize === 0) {
+    if (logSize === 0 && pidAlive) {
+      console.log(`  [${workerId}] starting... (pid alive)`)
+    } else if (logSize === 0) {
       console.log(`  [${workerId}] starting...`)
-    } else if (isStale) {
+    } else if (pidAlive) {
+      const secs = Math.round(msSinceWrite / 1000)
+      console.log(`  [${workerId}] running  (pid alive, last log ${secs}s ago)`)
+    } else if (msSinceWrite > STALE_THRESHOLD_MS) {
       const mins = Math.round(msSinceWrite / 60000)
-      console.log(`  [${workerId}] STALE — no activity for ${mins}m (log: ${logPath})`)
+      console.log(`  [${workerId}] STALE — pid dead, no log activity for ${mins}m`)
     } else {
       const secs = Math.round(msSinceWrite / 1000)
-      console.log(`  [${workerId}] running  (last activity ${secs}s ago)`)
+      console.log(`  [${workerId}] stopped? — pid dead, last log ${secs}s ago`)
     }
   }
 

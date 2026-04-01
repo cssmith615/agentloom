@@ -18,6 +18,7 @@ Usage:
   loom crew [N] "<task>"                Spawn N parallel workers on a task
   loom crew 2:explore "<task>"          Spawn typed workers (explore/plan/code-reviewer)
   loom crew --dry-run [N] "<task>"      Preview decomposed subtasks without launching
+  loom crew --serial [N] "<task>"       Run workers sequentially (each sees prior results)
   loom watch                            Live tail all worker logs (Ctrl+C to stop)
   loom stop                             Kill all background workers (SIGTERM)
   loom stop <workerId>                  Kill one worker
