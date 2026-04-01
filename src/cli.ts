@@ -5,6 +5,7 @@ import { status } from './commands/status.js'
 import { logs } from './commands/logs.js'
 import { collect } from './commands/collect.js'
 import { reset } from './commands/reset.js'
+import { watch } from './commands/watch.js'
 
 const [,, command, ...args] = process.argv
 
@@ -16,12 +17,20 @@ Usage:
   loom crew [N] "<task>"                Spawn N parallel workers on a task
   loom crew 2:explore "<task>"          Spawn typed workers (explore/plan/code-reviewer)
   loom crew --dry-run [N] "<task>"      Preview decomposed subtasks without launching
-  loom status                           Show active crew session
+  loom watch                            Live tail all worker logs (Ctrl+C to stop)
+  loom status                           Show active crew session + stale worker detection
   loom logs                             Show worker output summary
   loom logs <workerId>                  Show full log for a specific worker
   loom collect                          Synthesize worker results into a summary
   loom collect --no-ai                  Collect results without Claude synthesis
   loom reset --force                    Clear all session state
+
+Agent types (use with crew):
+  explore          Read-only research and mapping
+  plan             Architecture and approach planning
+  code-reviewer    Audit for correctness, security, quality
+  frontend-developer  UI and component work
+  general-purpose  Default — does whatever the subtask requires
 
 Modes (use $grind or $crew inside a Claude Code session):
   $grind   Persistence loop — keeps working until verified complete
@@ -33,8 +42,8 @@ Examples:
   loom crew 3 "audit every API endpoint for security issues"
   loom crew 2:explore+1:code-reviewer "review the payment flow"
   loom crew --dry-run 3 "migrate the database schema"
-  loom logs
-  loom logs w00
+  loom watch
+  loom collect
 `
 
 switch (command) {
@@ -43,6 +52,9 @@ switch (command) {
     break
   case 'crew':
     await crew(args)
+    break
+  case 'watch':
+    await watch(args)
     break
   case 'status':
     await status()

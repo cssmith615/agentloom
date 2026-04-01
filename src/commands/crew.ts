@@ -1,15 +1,13 @@
 import { execSync, spawn } from 'child_process'
 import { writeFile, mkdir, open } from 'fs/promises'
 import { join } from 'path'
-import { randomUUID } from 'crypto'
 import {
   parseWorkerSpec,
   initSession,
   writeContextSnapshot,
   decomposeTasks,
 } from '../team/orchestrator.js'
-import { allDone, pendingCount } from '../team/queue.js'
-import { readSession, writeSession, STATE_DIR } from '../state/session.js'
+import { readSession, STATE_DIR } from '../state/session.js'
 
 const hasTmux = (): boolean => {
   try { execSync('tmux -V', { stdio: 'ignore' }); return true } catch { return false }
@@ -17,6 +15,66 @@ const hasTmux = (): boolean => {
 
 const isWSL = (): boolean =>
   process.platform === 'linux' && !!process.env.WSL_DISTRO_NAME
+
+// Role-specific instructions injected into each worker prompt
+const AGENT_ROLE: Record<string, string> = {
+  'explore': `Your role is EXPLORER. You are read-only. Do not modify any files.
+- Map out the relevant code, files, and structure
+- Document what exists, how it connects, and what's notable
+- Your output feeds the other workers — be thorough and specific`,
+
+  'plan': `Your role is PLANNER. You are read-only. Do not modify any files.
+- Reason about the best approach to the subtask
+- Identify risks, dependencies, and open questions
+- Produce a concrete, ordered action plan other workers can execute`,
+
+  'code-reviewer': `Your role is CODE REVIEWER. You are read-only. Do not modify any files.
+- Audit the relevant code for correctness, security, and quality
+- Flag specific lines, patterns, or logic that are problematic
+- Assign severity (critical / high / medium / low) to each finding`,
+
+  'frontend-developer': `Your role is FRONTEND DEVELOPER.
+- Focus on UI, components, styling, and client-side logic
+- Follow existing conventions in the codebase
+- Write clean, accessible code`,
+
+  'general-purpose': `Your role is GENERAL PURPOSE WORKER.
+- Do whatever the subtask requires — research, implementation, or both
+- Use all tools available to you`,
+}
+
+function buildWorkerPrompt(
+  subtask: string,
+  contextPath: string,
+  sessionId: string,
+  workerId: string,
+  agentType: string,
+): string {
+  const resultFile = join(STATE_DIR, 'workers', `${workerId}-result.md`)
+  const roleInstructions = AGENT_ROLE[agentType] ?? AGENT_ROLE['general-purpose']
+
+  return `You are worker ${workerId} in an agentloom crew session (${sessionId}).
+
+${roleInstructions}
+
+## Your assigned subtask
+
+"${subtask}"
+
+## Protocol
+
+1. Read the shared context: ${contextPath}
+2. Do the work thoroughly using all tools available to you
+3. Append key findings to the context file so other workers can see them
+4. When done, write a result summary to: ${resultFile}
+   Format: brief markdown — what you did, what you found, any blockers
+
+## Rules
+- Stay focused on your assigned subtask and role
+- Do not stop until your subtask is complete or you have hit a genuine blocker
+
+Begin now.`
+}
 
 export async function crew(args: string[]): Promise<void> {
   if (args.length === 0) {
@@ -62,42 +120,22 @@ export async function crew(args: string[]): Promise<void> {
   console.log(`Context: ${contextPath}\n`)
 
   if (hasTmux() && !isWSL()) {
-    await launchTmux(session.id, totalWorkers, specs, tasks.map(t => t.description), contextPath)
+    await launchTmux(session.id, specs, tasks, contextPath)
   } else {
-    await launchBackground(session.id, specs, tasks.map(t => t.description), contextPath)
+    await launchBackground(session.id, specs, tasks, contextPath)
   }
 
   console.log(`\nWorkers launched. Monitor with:`)
   console.log(`  loom status`)
   console.log(`  loom logs`)
+  console.log(`  loom crew --watch   (live tail)`)
   console.log(`State dir: ${STATE_DIR}/`)
-}
-
-function buildWorkerPrompt(subtask: string, contextPath: string, sessionId: string, workerId: string): string {
-  const resultFile = join(STATE_DIR, 'workers', `${workerId}-result.md`)
-  return `You are worker ${workerId} in an agentloom crew session (${sessionId}).
-
-Your assigned subtask: "${subtask}"
-
-## Protocol
-
-1. Read the shared context: ${contextPath}
-2. Do the work thoroughly using all tools available to you
-3. When done, write a result summary to: ${resultFile}
-   Format: brief markdown — what you did, what you found, any blockers
-
-## Rules
-- Focus only on your assigned subtask
-- Write findings to the context file (${contextPath}) so other workers can see them
-- Do not stop until your subtask is complete or you have hit a genuine blocker
-
-Begin now.`
 }
 
 async function launchBackground(
   sessionId: string,
   specs: Array<{ count: number; agentType: string }>,
-  subtasks: string[],
+  tasks: Array<{ description: string; agentType?: string }>,
   contextPath: string,
 ): Promise<void> {
   await mkdir(join(STATE_DIR, 'workers'), { recursive: true })
@@ -106,13 +144,13 @@ async function launchBackground(
   for (const spec of specs) {
     for (let i = 0; i < spec.count; i++) {
       const workerId = `w${String(workerIdx).padStart(2, '0')}`
-      const subtask = subtasks[workerIdx] ?? subtasks[0] ?? ''
+      const subtask = tasks[workerIdx]?.description ?? tasks[0]?.description ?? ''
+      const agentType = tasks[workerIdx]?.agentType ?? spec.agentType
       workerIdx++
 
-      const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId)
+      const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId, agentType)
       const logFile = join(STATE_DIR, 'workers', `${workerId}.log`)
 
-      // Write prompt to disk for inspection
       await writeFile(join(STATE_DIR, 'workers', `${workerId}-prompt.md`), prompt)
 
       const log = await open(logFile, 'w')
@@ -127,30 +165,29 @@ async function launchBackground(
       )
       child.on('close', () => log.close())
       child.unref()
-      console.log(`  ✓ Worker ${workerId} (${spec.agentType}) launched [pid ${child.pid}] → ${logFile}`)
+      console.log(`  ✓ Worker ${workerId} (${agentType}) launched [pid ${child.pid}] → ${logFile}`)
     }
   }
 }
 
 async function launchTmux(
   sessionId: string,
-  count: number,
   specs: Array<{ count: number; agentType: string }>,
-  subtasks: string[],
+  tasks: Array<{ description: string; agentType?: string }>,
   contextPath: string,
 ): Promise<void> {
   const tmuxSession = `loom-${sessionId}`
-
   execSync(`tmux new-session -d -s ${tmuxSession} -x 220 -y 50`)
 
   let workerIdx = 0
   for (const spec of specs) {
     for (let i = 0; i < spec.count; i++) {
       const workerId = `w${String(workerIdx).padStart(2, '0')}`
-      const subtask = subtasks[workerIdx] ?? subtasks[0] ?? ''
+      const subtask = tasks[workerIdx]?.description ?? tasks[0]?.description ?? ''
+      const agentType = tasks[workerIdx]?.agentType ?? spec.agentType
       workerIdx++
 
-      const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId)
+      const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId, agentType)
 
       if (workerIdx > 1) {
         execSync(`tmux split-window -h -t ${tmuxSession}`)
@@ -159,7 +196,7 @@ async function launchTmux(
 
       const cmd = `AGENTLOOM_WORKER_ID=${workerId} AGENTLOOM_SESSION=${sessionId} claude --print --dangerously-skip-permissions -p '${prompt.replace(/'/g, "'\"'\"'")}'; echo '[worker done]'; read`
       execSync(`tmux send-keys -t ${tmuxSession} "${cmd}" Enter`)
-      console.log(`  ✓ Worker ${workerId} (${spec.agentType}) launched in tmux pane`)
+      console.log(`  ✓ Worker ${workerId} (${agentType}) launched in tmux pane`)
     }
   }
 
