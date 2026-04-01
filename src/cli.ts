@@ -6,6 +6,7 @@ import { logs } from './commands/logs.js'
 import { collect } from './commands/collect.js'
 import { reset } from './commands/reset.js'
 import { watch } from './commands/watch.js'
+import { stop } from './commands/stop.js'
 
 const [,, command, ...args] = process.argv
 
@@ -18,6 +19,8 @@ Usage:
   loom crew 2:explore "<task>"          Spawn typed workers (explore/plan/code-reviewer)
   loom crew --dry-run [N] "<task>"      Preview decomposed subtasks without launching
   loom watch                            Live tail all worker logs (Ctrl+C to stop)
+  loom stop                             Kill all background workers (SIGTERM)
+  loom stop <workerId>                  Kill one worker
   loom status                           Show active crew session + stale worker detection
   loom logs                             Show worker output summary
   loom logs <workerId>                  Show full log for a specific worker
@@ -64,6 +67,9 @@ switch (command) {
     break
   case 'collect':
     await collect(args)
+    break
+  case 'stop':
+    await stop(args)
     break
   case 'reset':
     await reset(args)

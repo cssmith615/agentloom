@@ -1,4 +1,4 @@
-import { execSync, spawn } from 'child_process'
+import { execSync, spawn, spawnSync } from 'child_process'
 import { writeFile, mkdir, open } from 'fs/promises'
 import { join } from 'path'
 import {
@@ -7,7 +7,7 @@ import {
   writeContextSnapshot,
   decomposeTasks,
 } from '../team/orchestrator.js'
-import { readSession, STATE_DIR } from '../state/session.js'
+import { STATE_DIR } from '../state/session.js'
 
 const hasTmux = (): boolean => {
   try { execSync('tmux -V', { stdio: 'ignore' }); return true } catch { return false }
@@ -16,19 +16,21 @@ const hasTmux = (): boolean => {
 const isWSL = (): boolean =>
   process.platform === 'linux' && !!process.env.WSL_DISTRO_NAME
 
-// Role-specific instructions injected into each worker prompt
+// Roles that must NOT receive --dangerously-skip-permissions
+const READ_ONLY_ROLES = new Set(['explore', 'plan', 'code-reviewer'])
+
 const AGENT_ROLE: Record<string, string> = {
-  'explore': `Your role is EXPLORER. You are read-only. Do not modify any files.
+  'explore': `Your role is EXPLORER. You are read-only — do not modify, create, or delete any files.
 - Map out the relevant code, files, and structure
 - Document what exists, how it connects, and what's notable
 - Your output feeds the other workers — be thorough and specific`,
 
-  'plan': `Your role is PLANNER. You are read-only. Do not modify any files.
+  'plan': `Your role is PLANNER. You are read-only — do not modify, create, or delete any files.
 - Reason about the best approach to the subtask
 - Identify risks, dependencies, and open questions
 - Produce a concrete, ordered action plan other workers can execute`,
 
-  'code-reviewer': `Your role is CODE REVIEWER. You are read-only. Do not modify any files.
+  'code-reviewer': `Your role is CODE REVIEWER. You are read-only — do not modify, create, or delete any files.
 - Audit the relevant code for correctness, security, and quality
 - Flag specific lines, patterns, or logic that are problematic
 - Assign severity (critical / high / medium / low) to each finding`,
@@ -109,7 +111,8 @@ export async function crew(args: string[]): Promise<void> {
     return
   }
 
-  console.log(`Mode:    ${hasTmux() && !isWSL() ? 'tmux' : 'background processes'}\n`)
+  const useTmux = hasTmux() && !isWSL() && process.stdout.isTTY
+  console.log(`Mode:    ${useTmux ? 'tmux' : 'background processes'}\n`)
 
   const session = await initSession(task, totalWorkers)
   const contextPath = await writeContextSnapshot(slug, task)
@@ -119,7 +122,7 @@ export async function crew(args: string[]): Promise<void> {
   console.log(`Tasks:   ${tasks.length} created`)
   console.log(`Context: ${contextPath}\n`)
 
-  if (hasTmux() && !isWSL()) {
+  if (useTmux) {
     await launchTmux(session.id, specs, tasks, contextPath)
   } else {
     await launchBackground(session.id, specs, tasks, contextPath)
@@ -127,8 +130,8 @@ export async function crew(args: string[]): Promise<void> {
 
   console.log(`\nWorkers launched. Monitor with:`)
   console.log(`  loom status`)
-  console.log(`  loom logs`)
-  console.log(`  loom crew --watch   (live tail)`)
+  console.log(`  loom watch`)
+  console.log(`  loom stop    (kill all workers)`)
   console.log(`State dir: ${STATE_DIR}/`)
 }
 
@@ -150,22 +153,39 @@ async function launchBackground(
 
       const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId, agentType)
       const logFile = join(STATE_DIR, 'workers', `${workerId}.log`)
+      const pidFile = join(STATE_DIR, 'workers', `${workerId}.pid`)
 
       await writeFile(join(STATE_DIR, 'workers', `${workerId}-prompt.md`), prompt)
 
+      const claudeArgs = ['--print', '-p', prompt]
+      // Only pass --dangerously-skip-permissions to roles that write files
+      if (!READ_ONLY_ROLES.has(agentType)) {
+        claudeArgs.splice(2, 0, '--dangerously-skip-permissions')
+      }
+
       const log = await open(logFile, 'w')
-      const child = spawn(
-        'claude',
-        ['--print', '--dangerously-skip-permissions', '-p', prompt],
-        {
-          detached: true,
-          stdio: ['ignore', log.fd, log.fd],
-          env: { ...process.env, AGENTLOOM_WORKER_ID: workerId, AGENTLOOM_SESSION: sessionId },
-        }
-      )
-      child.on('close', () => log.close())
+      const child = spawn('claude', claudeArgs, {
+        detached: true,
+        stdio: ['ignore', log.fd, log.fd],
+        env: { ...process.env, AGENTLOOM_WORKER_ID: workerId, AGENTLOOM_SESSION: sessionId },
+      })
+
+      child.on('error', async (err) => {
+        await writeFile(
+          join(STATE_DIR, 'workers', `${workerId}-result.md`),
+          `# Launch Error\n\nFailed to start worker: ${err.message}\n`
+        ).catch(() => { /* best effort */ })
+        log.close().catch(() => { /* best effort */ })
+      })
+
+      child.on('close', () => { log.close().catch(() => { /* best effort */ }) })
+
+      if (child.pid != null) {
+        await writeFile(pidFile, String(child.pid))
+      }
+
       child.unref()
-      console.log(`  ✓ Worker ${workerId} (${agentType}) launched [pid ${child.pid}] → ${logFile}`)
+      console.log(`  ✓ Worker ${workerId} (${agentType})${READ_ONLY_ROLES.has(agentType) ? ' [read-only]' : ''} launched [pid ${child.pid ?? '?'}] → ${logFile}`)
     }
   }
 }
@@ -177,7 +197,22 @@ async function launchTmux(
   contextPath: string,
 ): Promise<void> {
   const tmuxSession = `loom-${sessionId}`
-  execSync(`tmux new-session -d -s ${tmuxSession} -x 220 -y 50`)
+
+  // Check for session name collision
+  const existing = spawnSync('tmux', ['has-session', '-t', tmuxSession], { stdio: 'ignore' })
+  if (existing.status === 0) {
+    console.error(`tmux session "${tmuxSession}" already exists. Run: tmux kill-session -t ${tmuxSession}`)
+    process.exit(1)
+  }
+
+  try {
+    execSync(`tmux new-session -d -s ${tmuxSession} -x 220 -y 50`)
+  } catch (err) {
+    console.error(`Failed to create tmux session: ${err instanceof Error ? err.message : err}`)
+    process.exit(1)
+  }
+
+  await mkdir(join(STATE_DIR, 'workers'), { recursive: true })
 
   let workerIdx = 0
   for (const spec of specs) {
@@ -189,16 +224,44 @@ async function launchTmux(
 
       const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId, agentType)
 
+      // Write prompt and a runner script to disk — avoids ALL shell escaping issues
+      const scriptFile = join(STATE_DIR, 'workers', `${workerId}-run.sh`)
+      const permFlag = READ_ONLY_ROLES.has(agentType) ? '' : '--dangerously-skip-permissions '
+      await writeFile(join(STATE_DIR, 'workers', `${workerId}-prompt.md`), prompt)
+      await writeFile(scriptFile, [
+        '#!/bin/sh',
+        `export AGENTLOOM_WORKER_ID=${workerId}`,
+        `export AGENTLOOM_SESSION=${sessionId}`,
+        `claude --print ${permFlag}-p "$(cat '${join(STATE_DIR, 'workers', `${workerId}-prompt.md`)}')"`,
+        `echo '[worker done]'`,
+        `read`,
+      ].join('\n'))
+
       if (workerIdx > 1) {
-        execSync(`tmux split-window -h -t ${tmuxSession}`)
-        execSync(`tmux select-layout -t ${tmuxSession} tiled`)
+        try {
+          execSync(`tmux split-window -h -t ${tmuxSession}`)
+          execSync(`tmux select-layout -t ${tmuxSession} tiled`)
+        } catch {
+          // Non-fatal — continue with remaining workers even if layout fails
+        }
       }
 
-      const cmd = `AGENTLOOM_WORKER_ID=${workerId} AGENTLOOM_SESSION=${sessionId} claude --print --dangerously-skip-permissions -p '${prompt.replace(/'/g, "'\"'\"'")}'; echo '[worker done]'; read`
-      execSync(`tmux send-keys -t ${tmuxSession} "${cmd}" Enter`)
-      console.log(`  ✓ Worker ${workerId} (${agentType}) launched in tmux pane`)
+      try {
+        execSync(`tmux send-keys -t ${tmuxSession} "sh '${scriptFile}'" Enter`)
+      } catch (err) {
+        console.error(`  ✗ Worker ${workerId}: failed to send tmux keys: ${err instanceof Error ? err.message : err}`)
+        continue
+      }
+
+      console.log(`  ✓ Worker ${workerId} (${agentType})${READ_ONLY_ROLES.has(agentType) ? ' [read-only]' : ''} launched in tmux pane`)
     }
   }
 
-  execSync(`tmux attach-session -t ${tmuxSession}`)
+  // Attach only in interactive terminals
+  if (process.stdout.isTTY) {
+    spawnSync('tmux', ['attach-session', '-t', tmuxSession], { stdio: 'inherit' })
+  } else {
+    console.log(`\nTmux session: ${tmuxSession}`)
+    console.log(`Attach with: tmux attach-session -t ${tmuxSession}`)
+  }
 }
