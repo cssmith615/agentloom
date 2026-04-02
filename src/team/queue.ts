@@ -1,13 +1,16 @@
 import { readdir, readFile, rename, writeFile, stat, unlink } from 'fs/promises'
 import { join } from 'path'
 import { type Task, STATE_DIR } from '../state/session.js'
+import { loadConfig } from '../config.js'
 
 const TASKS_DIR = join(STATE_DIR, 'tasks')
-const CLAIM_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
 // Recover tasks whose worker crashed before completing.
 // Finds -claimed- files older than CLAIM_TTL_MS and re-queues them as -pending.
 export async function recoverStaleClaims(): Promise<number> {
+  const config = await loadConfig()
+  const claimTtlMs = config.claimTtlMinutes * 60 * 1000
+
   let recovered = 0
   let files: string[]
   try {
@@ -23,7 +26,7 @@ export async function recoverStaleClaims(): Promise<number> {
     const filePath = join(TASKS_DIR, file)
     try {
       const { mtimeMs } = await stat(filePath)
-      if (now - mtimeMs < CLAIM_TTL_MS) continue
+      if (now - mtimeMs < claimTtlMs) continue
 
       const taskId = file.split('-claimed-')[0]
       if (!taskId) continue

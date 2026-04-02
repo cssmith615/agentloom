@@ -9,6 +9,8 @@ import {
   decomposeTasks,
 } from '../team/orchestrator.js'
 import { STATE_DIR } from '../state/session.js'
+import { watch } from './watch.js'
+import { loadConfig } from '../config.js'
 
 const hasTmux = (): boolean => {
   try { execSync('tmux -V', { stdio: 'ignore' }); return true } catch { return false }
@@ -87,9 +89,11 @@ export async function crew(args: string[]): Promise<void> {
 
   const dryRun = args.includes('--dry-run')
   const serial = args.includes('--serial')
-  const filteredArgs = args.filter(a => a !== '--dry-run' && a !== '--serial')
+  const watchAfter = args.includes('--watch')
+  const filteredArgs = args.filter(a => !['--dry-run', '--serial', '--watch'].includes(a))
 
-  const { specs, task } = parseWorkerSpec(filteredArgs)
+  const config = await loadConfig()
+  const { specs, task } = parseWorkerSpec(filteredArgs, config.workers, config.agentType)
   const totalWorkers = specs.reduce((sum, s) => sum + s.count, 0)
   const slug = task.slice(0, 30).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
 
@@ -135,6 +139,11 @@ export async function crew(args: string[]): Promise<void> {
     console.log(`  loom stop    (kill all workers)`)
   } else {
     await launchBackground(session.id, specs, tasks, contextPath)
+    if (watchAfter) {
+      console.log()
+      await watch([])
+      return
+    }
     console.log(`\nWorkers launched. Monitor with:`)
     console.log(`  loom status`)
     console.log(`  loom watch`)

@@ -7,6 +7,7 @@ import { collect } from './commands/collect.js'
 import { reset } from './commands/reset.js'
 import { watch } from './commands/watch.js'
 import { stop } from './commands/stop.js'
+import { init } from './commands/init.js'
 
 const [,, command, ...args] = process.argv
 
@@ -14,11 +15,13 @@ const usage = `
 agentloom (loom) — workflow layer for Claude Code
 
 Usage:
+  loom init                             Create .loomrc config in current directory
   loom setup                            Install skills and initialize state dir
   loom crew [N] "<task>"                Spawn N parallel workers on a task
   loom crew 2:explore "<task>"          Spawn typed workers (explore/plan/code-reviewer)
   loom crew --dry-run [N] "<task>"      Preview decomposed subtasks without launching
   loom crew --serial [N] "<task>"       Run workers sequentially (each sees prior results)
+  loom crew --watch [N] "<task>"        Launch workers and immediately tail logs
   loom watch                            Live tail all worker logs (Ctrl+C to stop)
   loom stop                             Kill all background workers (SIGTERM)
   loom stop <workerId>                  Kill one worker
@@ -51,6 +54,9 @@ Examples:
 `
 
 switch (command) {
+  case 'init':
+    await init(args)
+    break
   case 'setup':
     await setup()
     break

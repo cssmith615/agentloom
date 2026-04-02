@@ -9,23 +9,21 @@ export type WorkerSpec = {
   agentType: string
 }
 
-export function parseWorkerSpec(args: string[]): { specs: WorkerSpec[], task: string } {
-  // Formats:
-  //   omc team "task description"
-  //   omc team 3 "task description"
-  //   omc team 2:explore "task description"
-  //   omc team 2:explore+1:code-reviewer "task description"
-
+export function parseWorkerSpec(
+  args: string[],
+  defaultWorkers = 2,
+  defaultAgentType = 'general-purpose',
+): { specs: WorkerSpec[], task: string } {
   const task = args[args.length - 1] ?? ''
   const specArg = args.length > 1 ? args[0] ?? '' : ''
 
   if (!specArg) {
-    return { specs: [{ count: 2, agentType: 'general-purpose' }], task }
+    return { specs: [{ count: defaultWorkers, agentType: defaultAgentType }], task }
   }
 
   // Plain number: "3"
   if (/^\d+$/.test(specArg)) {
-    return { specs: [{ count: parseInt(specArg), agentType: 'general-purpose' }], task }
+    return { specs: [{ count: parseInt(specArg), agentType: defaultAgentType }], task }
   }
 
   // Typed specs: "2:explore+1:code-reviewer"
@@ -34,7 +32,7 @@ export function parseWorkerSpec(args: string[]): { specs: WorkerSpec[], task: st
     const [countStr, agentType] = part.split(':')
     return {
       count: parseInt(countStr ?? '1'),
-      agentType: agentType ?? 'general-purpose',
+      agentType: agentType ?? defaultAgentType,
     }
   })
 

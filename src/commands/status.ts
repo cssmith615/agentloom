@@ -2,8 +2,7 @@ import { readSession, readTasks, STATE_DIR } from '../state/session.js'
 import { existsSync, statSync } from 'fs'
 import { join } from 'path'
 import { readdir, readFile } from 'fs/promises'
-
-const STALE_THRESHOLD_MS = 10 * 60 * 1000 // 10 min with no log growth AND no live PID = stale
+import { loadConfig } from '../config.js'
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -48,6 +47,9 @@ export async function status(): Promise<void> {
 
   if (logFiles.length === 0) return
 
+  const config = await loadConfig()
+  const staleThresholdMs = config.staleMinutes * 60 * 1000
+
   console.log(`\nWorkers: ${logFiles.length}`)
   const now = Date.now()
 
@@ -81,7 +83,7 @@ export async function status(): Promise<void> {
     } else if (pidAlive) {
       const secs = Math.round(msSinceWrite / 1000)
       console.log(`  [${workerId}] running  (pid alive, last log ${secs}s ago)`)
-    } else if (msSinceWrite > STALE_THRESHOLD_MS) {
+    } else if (msSinceWrite > staleThresholdMs) {
       const mins = Math.round(msSinceWrite / 60000)
       console.log(`  [${workerId}] STALE — pid dead, no log activity for ${mins}m`)
     } else {
