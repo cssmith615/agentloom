@@ -1,6 +1,5 @@
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, readdir } from 'fs/promises'
 import { join } from 'path'
-import { existsSync } from 'fs'
 
 export const STATE_DIR = '.claude-team'
 
@@ -16,15 +15,6 @@ export type Task = {
   error?: string
   createdAt: string
   claimedAt?: string
-  completedAt?: string
-}
-
-export type Worker = {
-  id: string
-  agentType: string
-  status: 'idle' | 'working' | 'done'
-  currentTaskId?: string
-  startedAt: string
   completedAt?: string
 }
 
@@ -53,9 +43,11 @@ export async function writeSession(session: Session): Promise<void> {
 }
 
 export async function readSession(): Promise<Session | null> {
-  const path = join(STATE_DIR, 'session.json')
-  if (!existsSync(path)) return null
-  return JSON.parse(await readFile(path, 'utf8'))
+  try {
+    return JSON.parse(await readFile(join(STATE_DIR, 'session.json'), 'utf8'))
+  } catch {
+    return null
+  }
 }
 
 export async function writeTask(task: Task): Promise<void> {
@@ -65,33 +57,16 @@ export async function writeTask(task: Task): Promise<void> {
   )
 }
 
-export async function writeWorker(worker: Worker): Promise<void> {
-  await writeFile(
-    join(STATE_DIR, 'workers', `${worker.id}.json`),
-    JSON.stringify(worker, null, 2)
-  )
-}
-
-export async function readWorkers(): Promise<Worker[]> {
-  const { readdir } = await import('fs/promises')
-  const dir = join(STATE_DIR, 'workers')
-  if (!existsSync(dir)) return []
-  const files = await readdir(dir)
-  return Promise.all(
-    files.filter(f => f.endsWith('.json')).map(async f =>
-      JSON.parse(await readFile(join(dir, f), 'utf8'))
-    )
-  )
-}
-
 export async function readTasks(): Promise<Task[]> {
-  const { readdir } = await import('fs/promises')
   const dir = join(STATE_DIR, 'tasks')
-  if (!existsSync(dir)) return []
-  const files = await readdir(dir)
-  return Promise.all(
-    files.filter(f => f.endsWith('.json')).map(async f =>
-      JSON.parse(await readFile(join(dir, f), 'utf8'))
+  try {
+    const files = await readdir(dir)
+    return Promise.all(
+      files.filter(f => f.endsWith('.json')).map(async f =>
+        JSON.parse(await readFile(join(dir, f), 'utf8'))
+      )
     )
-  )
+  } catch {
+    return []
+  }
 }

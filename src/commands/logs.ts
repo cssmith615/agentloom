@@ -1,5 +1,5 @@
 import { readFile, readdir } from 'fs/promises'
-import { join } from 'path'
+import { join, basename } from 'path'
 import { existsSync } from 'fs'
 import { STATE_DIR } from '../state/session.js'
 
@@ -11,7 +11,9 @@ export async function logs(args: string[]): Promise<void> {
     return
   }
 
-  const workerId = args[0]
+  // Sanitize workerId to prevent path traversal
+  const rawId = args[0]
+  const workerId = rawId ? basename(rawId) : undefined
 
   if (workerId) {
     // Show log for a specific worker

@@ -23,7 +23,13 @@ export async function setup(): Promise<void> {
 
   // 2. Install skills
   await mkdir(SKILLS_DEST, { recursive: true })
-  const skills = await readdir(SKILLS_SRC)
+  let skills: string[]
+  try {
+    skills = await readdir(SKILLS_SRC)
+  } catch {
+    console.error('✗ Could not find skills directory — package may be misconfigured')
+    process.exit(1)
+  }
   for (const skill of skills.filter(f => f.endsWith('.md'))) {
     const dest = join(SKILLS_DEST, skill)
     await copyFile(join(SKILLS_SRC, skill), dest)

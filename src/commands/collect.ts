@@ -2,7 +2,7 @@ import { readFile, readdir, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { spawnSync } from 'child_process'
-import { STATE_DIR, readSession, readTasks } from '../state/session.js'
+import { STATE_DIR, readSession } from '../state/session.js'
 
 const WORKERS_DIR = join(STATE_DIR, 'workers')
 
@@ -13,7 +13,6 @@ export async function collect(args: string[]): Promise<void> {
   }
 
   const session = await readSession()
-  const tasks = await readTasks()
 
   const files = await readdir(WORKERS_DIR)
   const resultFiles = files.filter(f => f.endsWith('-result.md')).sort()
@@ -45,7 +44,7 @@ export async function collect(args: string[]): Promise<void> {
   let synthesis = ''
 
   if (synthesize) {
-    console.log('\nSynthesizing with Claude...')
+    console.log('\nSynthesizing with Claude... (may take up to 60s)')
     const prompt = `You are summarizing the results of a multi-agent crew that worked on this task:
 
 "${taskDesc}"

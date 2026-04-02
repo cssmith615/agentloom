@@ -93,6 +93,7 @@ export async function crew(args: string[]): Promise<void> {
   const filteredArgs = args.filter(a => !['--dry-run', '--serial', '--watch'].includes(a))
 
   const config = await loadConfig()
+  const forcePermissions = config.dangerouslySkipPermissions === true
   const { specs, task } = parseWorkerSpec(filteredArgs, config.workers, config.agentType)
   const totalWorkers = specs.reduce((sum, s) => sum + s.count, 0)
   const slug = task.slice(0, 30).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
@@ -122,7 +123,7 @@ export async function crew(args: string[]): Promise<void> {
   console.log(`Mode:    ${mode}\n`)
 
   const session = await initSession(task, totalWorkers)
-  const contextPath = await writeContextSnapshot(slug, task)
+  const contextPath = await writeContextSnapshot(slug, session.id, task)
   const tasks = await decomposeTasks(task, specs)
 
   console.log(`Session: ${session.id}`)
@@ -130,15 +131,15 @@ export async function crew(args: string[]): Promise<void> {
   console.log(`Context: ${contextPath}\n`)
 
   if (serial) {
-    await launchSerial(session.id, specs, tasks, contextPath)
+    await launchSerial(session.id, specs, tasks, contextPath, forcePermissions)
     console.log(`\nAll workers finished. Run: loom collect`)
   } else if (useTmux) {
-    await launchTmux(session.id, specs, tasks, contextPath)
+    await launchTmux(session.id, specs, tasks, contextPath, forcePermissions)
     console.log(`\nWorkers launched. Monitor with:`)
     console.log(`  loom status`)
     console.log(`  loom stop    (kill all workers)`)
   } else {
-    await launchBackground(session.id, specs, tasks, contextPath)
+    await launchBackground(session.id, specs, tasks, contextPath, forcePermissions)
     if (watchAfter) {
       console.log()
       await watch([])
@@ -157,6 +158,7 @@ async function launchSerial(
   specs: Array<{ count: number; agentType: string }>,
   tasks: Array<{ description: string; agentType?: string }>,
   contextPath: string,
+  forcePermissions = false,
 ): Promise<void> {
   await mkdir(join(STATE_DIR, 'workers'), { recursive: true })
 
@@ -178,7 +180,7 @@ async function launchSerial(
 
       const claudeArgs = [
         '--print',
-        ...(!READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
+        ...(forcePermissions || !READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
         '-p',
         prompt,
       ]
@@ -215,6 +217,7 @@ async function launchBackground(
   specs: Array<{ count: number; agentType: string }>,
   tasks: Array<{ description: string; agentType?: string }>,
   contextPath: string,
+  forcePermissions = false,
 ): Promise<void> {
   await mkdir(join(STATE_DIR, 'workers'), { recursive: true })
 
@@ -235,7 +238,7 @@ async function launchBackground(
       // Build args declaratively — no positional splicing
       const claudeArgs = [
         '--print',
-        ...(!READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
+        ...(forcePermissions || !READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
         '-p',
         prompt,
       ]
@@ -272,6 +275,7 @@ async function launchTmux(
   specs: Array<{ count: number; agentType: string }>,
   tasks: Array<{ description: string; agentType?: string }>,
   contextPath: string,
+  forcePermissions = false,
 ): Promise<void> {
   const tmuxSession = `loom-${sessionId}`
 
@@ -312,7 +316,7 @@ async function launchTmux(
         `process.env.AGENTLOOM_WORKER_ID = ${JSON.stringify(workerId)}`,
         `process.env.AGENTLOOM_SESSION = ${JSON.stringify(sessionId)}`,
         `const prompt = readFileSync(${JSON.stringify(promptFile)}, 'utf8')`,
-        `const args = ['--print', ${!READ_ONLY_ROLES.has(agentType) ? `'--dangerously-skip-permissions', ` : ``}'${'-p'}', prompt]`,
+        `const args = ['--print', ${(forcePermissions || !READ_ONLY_ROLES.has(agentType)) ? `'--dangerously-skip-permissions', ` : ``}'${'-p'}', prompt]`,
         `const r = spawnSync('claude', args, { stdio: 'inherit' })`,
         `console.log('[worker done]')`,
         `process.exit(r.status ?? 0)`,

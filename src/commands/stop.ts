@@ -53,6 +53,9 @@ export async function stop(args: string[]): Promise<void> {
 
   console.log(`\n${killed} killed, ${notFound} already stopped.`)
   if (killed > 0) {
+    if (process.platform === 'win32') {
+      console.log('  note: SIGTERM on Windows is a force kill (TerminateProcess)')
+    }
     console.log('State preserved. Run: loom reset --force  to clear it.')
   }
 }

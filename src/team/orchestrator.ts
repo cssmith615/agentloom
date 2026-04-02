@@ -30,10 +30,11 @@ export function parseWorkerSpec(
   const parts = specArg.split('+')
   const specs: WorkerSpec[] = parts.map(part => {
     const [countStr, agentType] = part.split(':')
-    return {
-      count: parseInt(countStr ?? '1'),
-      agentType: agentType ?? defaultAgentType,
+    const count = parseInt(countStr ?? '1')
+    if (isNaN(count) || count < 1) {
+      throw new Error(`Invalid worker spec "${part}" — count must be a positive integer`)
     }
+    return { count, agentType: agentType ?? defaultAgentType }
   })
 
   return { specs, task }
@@ -54,9 +55,10 @@ export async function initSession(description: string, workerCount: number): Pro
   return session
 }
 
-export async function writeContextSnapshot(slug: string, task: string): Promise<string> {
-  const path = join(STATE_DIR, 'context', `${slug}.md`)
-  const content = `# Task Context\n\n**Task:** ${task}\n\n**Started:** ${new Date().toISOString()}\n\n## Notes\n\n_Workers will append findings here._\n`
+export async function writeContextSnapshot(slug: string, sessionId: string, task: string): Promise<string> {
+  // Include session ID so concurrent runs with similar task names don't clobber each other
+  const path = join(STATE_DIR, 'context', `${slug}-${sessionId.slice(0, 6)}.md`)
+  const content = `# Task Context\n\n**Task:** ${task}\n\n**Session:** ${sessionId}\n\n**Started:** ${new Date().toISOString()}\n\n## Notes\n\n_Workers will append findings here._\n`
   await writeFile(path, content)
   return path
 }
@@ -99,19 +101,19 @@ Task: "${task}"`
       timeout: 30_000,
     })
 
-    if (result.status !== 0 || !result.stdout) throw new Error(result.stderr ?? 'no output')
+    if (result.status !== 0 || !result.stdout) {
+      throw new Error(result.stderr ?? 'no output')
+    }
 
-    // Extract JSON array from the response (strip any surrounding prose)
     const match = result.stdout.match(/\[[\s\S]*\]/)
     if (!match) throw new Error('No JSON array in response')
     const parsed: unknown = JSON.parse(match[0])
     if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty array')
     const subtasks = parsed.map(String)
-    // Pad or trim to exactly n
     while (subtasks.length < n) subtasks.push(task)
     return subtasks.slice(0, n)
-  } catch {
-    // Fallback: every worker gets the same task description
+  } catch (err) {
+    process.stderr.write(`[agentloom] Task decomposition failed (${err instanceof Error ? err.message : err}) — all workers will receive the same task description\n`)
     return Array<string>(n).fill(task)
   }
 }

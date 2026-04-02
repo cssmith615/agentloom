@@ -5,11 +5,16 @@ import { STATE_DIR } from '../state/session.js'
 
 const WORKERS_DIR = join(STATE_DIR, 'workers')
 const POLL_MS = 800
+const STALE_TIMEOUT_MS = 15 * 60 * 1000 // 15 min no log growth + dead PID = give up
 
-// A rotating set of ANSI colors for worker prefixes
 const COLORS = ['\x1b[36m', '\x1b[33m', '\x1b[35m', '\x1b[32m', '\x1b[34m', '\x1b[31m']
 const RESET = '\x1b[0m'
 const DIM = '\x1b[2m'
+const YELLOW = '\x1b[33m'
+
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
 
 export async function watch(_args: string[]): Promise<void> {
   if (!existsSync(WORKERS_DIR)) {
@@ -19,15 +24,19 @@ export async function watch(_args: string[]): Promise<void> {
 
   console.log(`${DIM}Watching worker logs. Ctrl+C to stop.${RESET}\n`)
 
-  // Track how many bytes we've read from each log file
   const offsets: Record<string, number> = {}
+  const lastGrowth: Record<string, number> = {}
   const seen = new Set<string>()
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     if (!existsSync(WORKERS_DIR)) break
 
-    const files = await readdir(WORKERS_DIR)
+    let files: string[]
+    try {
+      files = await readdir(WORKERS_DIR)
+    } catch {
+      break
+    }
     const logFiles = files.filter(f => f.endsWith('.log')).sort()
 
     for (const logFile of logFiles) {
@@ -41,23 +50,27 @@ export async function watch(_args: string[]): Promise<void> {
         console.log(`${color}[${workerId}]${RESET} ${DIM}started${resultExists ? ' (already done)' : ''}${RESET}`)
       }
 
-      const currentSize = (await stat(filePath)).size
+      // Guard stat — file may be deleted mid-poll (e.g. loom reset)
+      let currentSize: number
+      try {
+        currentSize = (await stat(filePath)).size
+      } catch {
+        continue
+      }
+
       const offset = offsets[workerId] ?? 0
-
       if (currentSize > offset) {
-        const buf = await readFile(filePath)
-        const newContent = buf.slice(offset).toString('utf8')
-        offsets[workerId] = currentSize
-
-        const lines = newContent.split('\n')
-        for (const line of lines) {
-          if (line.trim()) {
-            process.stdout.write(`${color}[${workerId}]${RESET} ${line}\n`)
+        lastGrowth[workerId] = Date.now()
+        const buf = await readFile(filePath).catch(() => null)
+        if (buf) {
+          const newContent = buf.slice(offset).toString('utf8')
+          offsets[workerId] = currentSize
+          for (const line of newContent.split('\n')) {
+            if (line.trim()) process.stdout.write(`${color}[${workerId}]${RESET} ${line}\n`)
           }
         }
       }
 
-      // Check if worker just finished (result file appeared)
       const resultPath = join(WORKERS_DIR, `${workerId}-result.md`)
       const doneKey = `${workerId}-done`
       if (existsSync(resultPath) && !seen.has(doneKey)) {
@@ -68,12 +81,38 @@ export async function watch(_args: string[]): Promise<void> {
 
     // Exit when all known workers have results
     if (logFiles.length > 0) {
-      const allDone = logFiles.every(f => {
-        const id = f.replace('.log', '')
-        return existsSync(join(WORKERS_DIR, `${id}-result.md`))
-      })
-      if (allDone) {
+      const workersDone = logFiles.map(f => f.replace('.log', '')).filter(id =>
+        existsSync(join(WORKERS_DIR, `${id}-result.md`))
+      )
+
+      if (workersDone.length === logFiles.length) {
         console.log(`\n${DIM}All workers done. Run: loom collect${RESET}`)
+        break
+      }
+
+      // Stale detection: workers with no result, dead PID, and log silent for >15min
+      const now = Date.now()
+      const staleWorkers: string[] = []
+      for (const logFile of logFiles) {
+        const id = logFile.replace('.log', '')
+        if (existsSync(join(WORKERS_DIR, `${id}-result.md`))) continue
+
+        const pidPath = join(WORKERS_DIR, `${id}.pid`)
+        let pidAlive = false
+        if (existsSync(pidPath)) {
+          const pid = parseInt(await readFile(pidPath, 'utf8').catch(() => ''), 10)
+          if (!isNaN(pid)) pidAlive = isProcessAlive(pid)
+        }
+
+        const sinceGrowth = now - (lastGrowth[id] ?? now)
+        if (!pidAlive && sinceGrowth > STALE_TIMEOUT_MS) {
+          staleWorkers.push(id)
+        }
+      }
+
+      if (staleWorkers.length > 0 && staleWorkers.length + workersDone.length === logFiles.length) {
+        console.log(`\n${YELLOW}Workers stalled (dead PID, no output for 15min): ${staleWorkers.join(', ')}${RESET}`)
+        console.log(`${DIM}Run: loom logs <workerId>  to inspect. loom collect to gather what's available.${RESET}`)
         break
       }
     }
