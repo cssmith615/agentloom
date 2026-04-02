@@ -180,7 +180,7 @@ async function launchSerial(
 
       const claudeArgs = [
         '--print',
-        ...(forcePermissions || !READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
+        ...(forcePermissions && !READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
         '-p',
         prompt,
       ]
@@ -238,12 +238,15 @@ async function launchBackground(
       // Build args declaratively — no positional splicing
       const claudeArgs = [
         '--print',
-        ...(forcePermissions || !READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
+        ...(forcePermissions && !READ_ONLY_ROLES.has(agentType) ? ['--dangerously-skip-permissions'] : []),
         '-p',
         prompt,
       ]
 
       const log = await open(logFile, 'w')
+      let logClosed = false
+      const closeLog = () => { if (!logClosed) { logClosed = true; log.close().catch(() => {}) } }
+
       const child = spawn('claude', claudeArgs, {
         detached: true,
         stdio: ['ignore', log.fd, log.fd],
@@ -255,10 +258,10 @@ async function launchBackground(
           join(STATE_DIR, 'workers', `${workerId}-result.md`),
           `# Launch Error\n\nFailed to start worker: ${err.message}\n`
         ).catch(() => { /* best effort */ })
-        log.close().catch(() => { /* best effort */ })
+        closeLog()
       })
 
-      child.on('close', () => { log.close().catch(() => { /* best effort */ }) })
+      child.on('close', () => { closeLog() })
 
       if (child.pid != null) {
         await writeFile(pidFile, String(child.pid))
@@ -286,10 +289,9 @@ async function launchTmux(
     process.exit(1)
   }
 
-  try {
-    execSync(`tmux new-session -d -s ${tmuxSession} -x 220 -y 50`)
-  } catch (err) {
-    console.error(`Failed to create tmux session: ${err instanceof Error ? err.message : err}`)
+  const newSession = spawnSync('tmux', ['new-session', '-d', '-s', tmuxSession, '-x', '220', '-y', '50'], { stdio: 'ignore' })
+  if (newSession.status !== 0) {
+    console.error(`Failed to create tmux session: ${newSession.stderr?.toString().trim() ?? 'unknown error'}`)
     process.exit(1)
   }
 
@@ -305,20 +307,25 @@ async function launchTmux(
 
       const prompt = buildWorkerPrompt(subtask, contextPath, sessionId, workerId, agentType)
       const promptFile = join(STATE_DIR, 'workers', `${workerId}-prompt.md`)
+      const logFile = join(STATE_DIR, 'workers', `${workerId}.log`)
+      const pidFile = join(STATE_DIR, 'workers', `${workerId}.pid`)
       const scriptFile = join(STATE_DIR, 'workers', `${workerId}-run.mjs`)
 
       await writeFile(promptFile, prompt)
 
-      // Node.js runner — JSON.stringify safely encodes all values, no shell expansion possible
+      // Node.js runner — JSON.stringify safely encodes all values, no shell expansion possible.
+      // Writes PID and logs to the same files as launchBackground so loom stop/watch/status work.
+      const skipPerms = forcePermissions && !READ_ONLY_ROLES.has(agentType)
       await writeFile(scriptFile, [
-        `import { readFileSync } from 'fs'`,
+        `import { readFileSync, writeFileSync, openSync } from 'fs'`,
         `import { spawnSync } from 'child_process'`,
         `process.env.AGENTLOOM_WORKER_ID = ${JSON.stringify(workerId)}`,
         `process.env.AGENTLOOM_SESSION = ${JSON.stringify(sessionId)}`,
+        `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))`,
+        `const logFd = openSync(${JSON.stringify(logFile)}, 'w')`,
         `const prompt = readFileSync(${JSON.stringify(promptFile)}, 'utf8')`,
-        `const args = ['--print', ${(forcePermissions || !READ_ONLY_ROLES.has(agentType)) ? `'--dangerously-skip-permissions', ` : ``}'${'-p'}', prompt]`,
-        `const r = spawnSync('claude', args, { stdio: 'inherit' })`,
-        `console.log('[worker done]')`,
+        `const args = ['--print', ${skipPerms ? `'--dangerously-skip-permissions', ` : ``}'${'-p'}', prompt]`,
+        `const r = spawnSync('claude', args, { stdio: ['ignore', logFd, logFd] })`,
         `process.exit(r.status ?? 0)`,
       ].join('\n'))
 

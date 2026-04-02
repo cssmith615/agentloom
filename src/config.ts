@@ -17,7 +17,9 @@ const DEFAULTS: Required<LoomConfig> = {
   agentType: 'general-purpose',
   claimTtlMinutes: 30,
   staleMinutes: 10,
-  dangerouslySkipPermissions: false,
+  // Default true: background workers must skip permission prompts to run non-interactively.
+  // Set to false in .loomrc to require interactive approval (workers will pause on each action).
+  dangerouslySkipPermissions: true,
 }
 
 export async function loadConfig(): Promise<Required<LoomConfig>> {

@@ -1,7 +1,9 @@
-import { readFile, writeFile, mkdir, readdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, readdir, unlink } from 'fs/promises'
 import { join } from 'path'
 
-export const STATE_DIR = '.claude-team'
+// Absolute path so loom works correctly regardless of which subdirectory it's invoked from.
+// NOTE: resolves to cwd at process start — does not walk up to find project root.
+export const STATE_DIR = join(process.cwd(), '.claude-team')
 
 export type TaskStatus = 'pending' | 'claimed' | 'done' | 'failed'
 
@@ -51,21 +53,38 @@ export async function readSession(): Promise<Session | null> {
 }
 
 export async function writeTask(task: Task): Promise<void> {
-  await writeFile(
-    join(STATE_DIR, 'tasks', `${task.id}-${task.status}.json`),
-    JSON.stringify(task, null, 2)
-  )
+  const dir = join(STATE_DIR, 'tasks')
+  // Remove any existing files for this task id to prevent ghost duplicates on status change.
+  try {
+    const files = await readdir(dir)
+    await Promise.all(
+      files
+        .filter(f => f.startsWith(`${task.id}-`) && f.endsWith('.json'))
+        .map(f => unlink(join(dir, f)).catch(() => {}))
+    )
+  } catch { /* dir may not exist yet — ensureStateDir handles this */ }
+  await writeFile(join(dir, `${task.id}-${task.status}.json`), JSON.stringify(task, null, 2))
 }
 
 export async function readTasks(): Promise<Task[]> {
   const dir = join(STATE_DIR, 'tasks')
   try {
     const files = await readdir(dir)
-    return Promise.all(
+    const tasks = await Promise.all(
       files.filter(f => f.endsWith('.json')).map(async f =>
-        JSON.parse(await readFile(join(dir, f), 'utf8'))
+        JSON.parse(await readFile(join(dir, f), 'utf8')) as Task
       )
     )
+    // Deduplicate by id — keep highest-priority status in case of ghost duplicates.
+    const STATUS_PRIORITY: Record<string, number> = { done: 4, failed: 3, claimed: 2, pending: 1 }
+    const byId = new Map<string, Task>()
+    for (const task of tasks) {
+      const existing = byId.get(task.id)
+      if (!existing || (STATUS_PRIORITY[task.status] ?? 0) > (STATUS_PRIORITY[existing.status] ?? 0)) {
+        byId.set(task.id, task)
+      }
+    }
+    return [...byId.values()]
   } catch {
     return []
   }

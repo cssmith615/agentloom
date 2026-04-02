@@ -3,6 +3,7 @@ import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
+import { execSync } from 'child_process'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SKILLS_SRC = join(__dirname, '../../skills')
@@ -12,7 +13,6 @@ export async function setup(): Promise<void> {
   console.log('agentloom setup\n')
 
   // 1. Validate claude CLI exists
-  const { execSync } = await import('child_process')
   try {
     execSync('claude --version', { stdio: 'ignore' })
     console.log('✓ claude CLI found')

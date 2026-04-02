@@ -44,7 +44,7 @@ export async function initSession(description: string, workerCount: number): Pro
   await ensureStateDir()
 
   const session: Session = {
-    id: randomUUID().slice(0, 8),
+    id: randomUUID().replace(/-/g, '').slice(0, 16),
     description,
     status: 'running',
     workerCount,
@@ -73,7 +73,7 @@ export async function decomposeTasks(task: string, specs: WorkerSpec[], dryRun =
   for (const spec of specs) {
     for (let i = 0; i < spec.count; i++) {
       const t: Task = {
-        id: randomUUID().slice(0, 8),
+        id: randomUUID().replace(/-/g, '').slice(0, 16),
         description: subtasks[idx] ?? task,
         agentType: spec.agentType,
         status: 'pending',
@@ -105,9 +105,11 @@ Task: "${task}"`
       throw new Error(result.stderr ?? 'no output')
     }
 
-    const match = result.stdout.match(/\[[\s\S]*\]/)
-    if (!match) throw new Error('No JSON array in response')
-    const parsed: unknown = JSON.parse(match[0])
+    // Use first '[' and last ']' to avoid greedy regex over-capturing trailing brackets
+    const start = result.stdout.indexOf('[')
+    const end = result.stdout.lastIndexOf(']')
+    if (start === -1 || end === -1 || end < start) throw new Error('No JSON array in response')
+    const parsed: unknown = JSON.parse(result.stdout.slice(start, end + 1))
     if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty array')
     const subtasks = parsed.map(String)
     while (subtasks.length < n) subtasks.push(task)

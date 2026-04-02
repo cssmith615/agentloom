@@ -4,6 +4,10 @@ import { existsSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { STATE_DIR, readSession } from '../state/session.js'
 
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
 const WORKERS_DIR = join(STATE_DIR, 'workers')
 
 export async function collect(args: string[]): Promise<void> {
@@ -21,6 +25,20 @@ export async function collect(args: string[]): Promise<void> {
     console.log('No worker results yet. Check status with: loom status')
     console.log('Workers still running? Check: loom logs')
     return
+  }
+
+  // Warn if any workers are still running — synthesis will be incomplete
+  const pidFiles = files.filter(f => f.endsWith('.pid'))
+  const stillRunning: string[] = []
+  for (const pidFile of pidFiles) {
+    const id = pidFile.replace('.pid', '')
+    if (existsSync(join(WORKERS_DIR, `${id}-result.md`))) continue
+    const pid = parseInt(await readFile(join(WORKERS_DIR, pidFile), 'utf8').catch(() => ''), 10)
+    if (!isNaN(pid) && isProcessAlive(pid)) stillRunning.push(id)
+  }
+  if (stillRunning.length > 0) {
+    console.log(`⚠  Workers still running: ${stillRunning.join(', ')} — results will be incomplete`)
+    console.log(`   Wait for completion or run: loom stop\n`)
   }
 
   console.log(`\nCollecting results from ${resultFiles.length} worker(s)...\n`)

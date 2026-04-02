@@ -2,10 +2,10 @@ import { readdir, stat, readFile } from 'fs/promises'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { STATE_DIR } from '../state/session.js'
+import { loadConfig } from '../config.js'
 
 const WORKERS_DIR = join(STATE_DIR, 'workers')
 const POLL_MS = 800
-const STALE_TIMEOUT_MS = 15 * 60 * 1000 // 15 min no log growth + dead PID = give up
 
 const COLORS = ['\x1b[36m', '\x1b[33m', '\x1b[35m', '\x1b[32m', '\x1b[34m', '\x1b[31m']
 const RESET = '\x1b[0m'
@@ -19,8 +19,11 @@ function isProcessAlive(pid: number): boolean {
 export async function watch(_args: string[]): Promise<void> {
   if (!existsSync(WORKERS_DIR)) {
     console.log('No active session. Run: loom crew "<task>"')
-    process.exit(1)
+    return
   }
+
+  const config = await loadConfig()
+  const STALE_TIMEOUT_MS = config.staleMinutes * 60 * 1000
 
   console.log(`${DIM}Watching worker logs. Ctrl+C to stop.${RESET}\n`)
 
@@ -111,7 +114,7 @@ export async function watch(_args: string[]): Promise<void> {
       }
 
       if (staleWorkers.length > 0 && staleWorkers.length + workersDone.length === logFiles.length) {
-        console.log(`\n${YELLOW}Workers stalled (dead PID, no output for 15min): ${staleWorkers.join(', ')}${RESET}`)
+        console.log(`\n${YELLOW}Workers stalled (dead PID, no output for ${config.staleMinutes}min): ${staleWorkers.join(', ')}${RESET}`)
         console.log(`${DIM}Run: loom logs <workerId>  to inspect. loom collect to gather what's available.${RESET}`)
         break
       }
