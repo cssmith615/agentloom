@@ -8,9 +8,9 @@ import {
   writeContextSnapshot,
   decomposeTasks,
 } from '../team/orchestrator.js'
-import { STATE_DIR } from '../state/session.js'
+import { STATE_DIR, readSession } from '../state/session.js'
 import { watch } from './watch.js'
-import { loadConfig } from '../config.js'
+import { loadConfig, MAX_WORKERS, LOOMRC } from '../config.js'
 
 const hasTmux = (): boolean => {
   try { execSync('tmux -V', { stdio: 'ignore' }); return true } catch { return false }
@@ -64,7 +64,9 @@ ${roleInstructions}
 
 ## Your assigned subtask
 
-"${subtask}"
+---SUBTASK BEGIN---
+${subtask}
+---SUBTASK END---
 
 ## Protocol
 
@@ -94,13 +96,37 @@ export async function crew(args: string[]): Promise<void> {
 
   const config = await loadConfig()
   const forcePermissions = config.dangerouslySkipPermissions === true
+
+  // Warn when config is loaded from disk so users notice repo-supplied settings
+  if (existsSync(LOOMRC)) {
+    console.log(`Config:  loaded from ${LOOMRC}`)
+  }
+
   const { specs, task } = parseWorkerSpec(filteredArgs, config.workers, config.agentType)
   const totalWorkers = specs.reduce((sum, s) => sum + s.count, 0)
+
+  // Guard against runaway worker counts
+  if (totalWorkers > MAX_WORKERS) {
+    console.error(`Error: worker count ${totalWorkers} exceeds maximum (${MAX_WORKERS})`)
+    process.exit(1)
+  }
+
+  // Guard against orphaning an active session
+  const activeSession = await readSession()
+  if (activeSession && activeSession.status === 'running' && existsSync(join(STATE_DIR, 'workers'))) {
+    console.error(`⚠  Active session found: ${activeSession.id} ("${activeSession.description}")`)
+    console.error(`   Run: loom reset --force  to clear it first.`)
+    process.exit(1)
+  }
+
   const slug = task.slice(0, 30).toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
 
   console.log(`\nagentloom crew`)
   console.log(`Task:    ${task}`)
   console.log(`Workers: ${totalWorkers}`)
+  if (forcePermissions) {
+    console.log(`⚠  dangerouslySkipPermissions: true — workers run with full file system access`)
+  }
 
   if (dryRun) {
     console.log(`Mode:    dry-run\n`)
@@ -330,12 +356,9 @@ async function launchTmux(
       ].join('\n'))
 
       if (workerIdx > 1) {
-        try {
-          execSync(`tmux split-window -h -t ${tmuxSession}`)
-          execSync(`tmux select-layout -t ${tmuxSession} tiled`)
-        } catch {
-          // Non-fatal — continue with remaining workers even if layout fails
-        }
+        // Use spawnSync array form — consistent with all other tmux calls
+        spawnSync('tmux', ['split-window', '-h', '-t', tmuxSession], { stdio: 'ignore' })
+        spawnSync('tmux', ['select-layout', '-t', tmuxSession, 'tiled'], { stdio: 'ignore' })
       }
 
       // Use spawnSync (no shell) so the scriptFile path is passed as a literal argument.

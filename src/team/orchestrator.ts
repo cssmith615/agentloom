@@ -91,9 +91,11 @@ export async function decomposeTasks(task: string, specs: WorkerSpec[], dryRun =
 function callClaudeDecompose(task: string, n: number): string[] {
   if (n <= 1) return [task]
 
-  const prompt = `Decompose this task into exactly ${n} independent subtasks that can run in parallel. Each must be specific and actionable. Respond with a JSON array of ${n} strings — no explanation, no markdown, just the array.
+  const prompt = `Decompose the following task into exactly ${n} independent subtasks that can run in parallel. Each must be specific and actionable. Respond with a JSON array of ${n} strings — no explanation, no markdown, just the array.
 
-Task: "${task}"`
+---TASK BEGIN---
+${task}
+---TASK END---`
 
   try {
     const result = spawnSync('claude', ['--print', '-p', prompt], {

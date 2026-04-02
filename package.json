@@ -1,6 +1,6 @@
 {
   "name": "@chuckssmith/agentloom",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A workflow layer for Claude Code — reusable roles, persistence loops, and multi-agent crew coordination",
   "keywords": [
     "ai",

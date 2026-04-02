@@ -1,7 +1,8 @@
 import { rm, readdir, readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join } from 'path'
-import { STATE_DIR } from '../state/session.js'
+import { spawnSync } from 'child_process'
+import { STATE_DIR, readSession } from '../state/session.js'
 
 const WORKERS_DIR = join(STATE_DIR, 'workers')
 
@@ -19,7 +20,7 @@ export async function reset(args: string[]): Promise<void> {
     return
   }
 
-  // Kill any live workers before deleting their PID files
+  // Kill any live PID-based workers before deleting their PID files
   if (existsSync(WORKERS_DIR)) {
     try {
       const files = await readdir(WORKERS_DIR)
@@ -39,6 +40,20 @@ export async function reset(args: string[]): Promise<void> {
     } catch {
       // Workers dir unreadable — proceed with delete anyway
     }
+  }
+
+  // Kill any active tmux session for this loom session
+  try {
+    const session = await readSession()
+    if (session) {
+      const tmuxName = `loom-${session.id}`
+      const r = spawnSync('tmux', ['kill-session', '-t', tmuxName], { stdio: 'ignore' })
+      if (r.status === 0) {
+        console.log(`  killed tmux session ${tmuxName}`)
+      }
+    }
+  } catch {
+    // No session file or tmux not available — ignore
   }
 
   await rm(STATE_DIR, { recursive: true, force: true })

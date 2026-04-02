@@ -63,9 +63,9 @@ export async function watch(_args: string[]): Promise<void> {
 
       const offset = offsets[workerId] ?? 0
       if (currentSize > offset) {
-        lastGrowth[workerId] = Date.now()
         const buf = await readFile(filePath).catch(() => null)
         if (buf) {
+          lastGrowth[workerId] = Date.now()  // only update after confirming read succeeded
           const newContent = buf.slice(offset).toString('utf8')
           offsets[workerId] = currentSize
           for (const line of newContent.split('\n')) {
