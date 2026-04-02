@@ -110,8 +110,10 @@ loom collect --no-ai         Concatenate results without Claude synthesis
 ```
 loom stop                    Kill all background workers (SIGTERM)
 loom stop <workerId>         Kill one worker
-loom reset --force           Wipe .claude-team/ state
+loom reset --force           Wipe .claude-team/ state (kills workers + tmux session)
 ```
+
+**One session at a time:** `loom crew` blocks if a session is already active. Run `loom reset --force` to clear it.
 
 ---
 
@@ -138,16 +140,22 @@ Run `loom init` to create a `.loomrc` in your project directory:
   "workers": 2,
   "agentType": "general-purpose",
   "claimTtlMinutes": 30,
-  "staleMinutes": 10
+  "staleMinutes": 10,
+  "dangerouslySkipPermissions": true
 }
 ```
 
 | Key | Default | Description |
 |---|---|---|
-| `workers` | 2 | Default worker count when none specified |
+| `workers` | 2 | Default worker count when none specified (max 20) |
 | `agentType` | `general-purpose` | Default agent type when none specified |
 | `claimTtlMinutes` | 30 | Minutes before a crashed worker's claimed task is re-queued |
 | `staleMinutes` | 10 | Minutes of dead-pid + log silence before worker is flagged STALE |
+| `dangerouslySkipPermissions` | `true` | Pass `--dangerously-skip-permissions` to workers. Required for non-interactive background operation. Set `false` to require interactive approval on each tool use (workers will pause). |
+
+**Note:** When `.loomrc` is loaded from disk, agentloom prints a notice so you're always aware when a project-supplied config is active. A warning is also printed when `dangerouslySkipPermissions: true`.
+
+**Security note:** Be cautious with `.loomrc` files from untrusted repositories — a committed config can set `workers` and `dangerouslySkipPermissions` silently.
 
 ---
 
